@@ -35,14 +35,6 @@ GOOGLE_RSS_FEEDS = [
     "https://news.google.com/rss/search?q=オンラインカジノ+暗号資産+when:2d&hl=ja&gl=JP&ceid=JP:ja",
 ]
 
-YAHOO_SEARCH_URLS = [
-    "https://news.yahoo.co.jp/search?p=オンラインカジノ",
-    "https://news.yahoo.co.jp/search?p=オンカジ",
-    "https://news.yahoo.co.jp/search?p=オンライン賭博",
-    "https://news.yahoo.co.jp/search?p=オンラインカジノ%20逮捕",
-    "https://news.yahoo.co.jp/search?p=オンラインカジノ%20規制",
-]
-
 KEYWORDS = [
     "オンラインカジノ", "オンカジ", "オンライン賭博", "違法カジノ",
     "カジノサイト", "カジノアプリ", "海外カジノ",
@@ -76,14 +68,6 @@ CATEGORY_RULES = {
     "Крипто": ["暗号資産", "仮想通貨", "ビットコイン", "crypto"],
     "Affiliate / Marketing": ["広告", "アフィリエイト", "宣伝", "SNS", "インフルエンサー"],
 }
-
-HIGH_IMPORTANCE_WORDS = [
-    "逮捕", "摘発", "書類送検", "規制", "接続遮断", "削除要請", "総務省", "警察", "政府", "賭博罪"
-]
-
-MEDIUM_IMPORTANCE_WORDS = [
-    "決済", "送金", "暗号資産", "仮想通貨", "広告", "アフィリエイト"
-]
 
 def load_json_file(path, default):
     if not os.path.exists(path):
@@ -121,6 +105,7 @@ def clean_html(text):
 
 def remove_publisher_suffix(text):
     text = re.sub(r"\s+[-｜|]\s+[^-｜|]{1,50}$", "", text)
+    text = re.sub(r"\s+\d{1,2}/\d{1,2}\([^)]+\)\s+\d{1,2}:\d{2}$", "", text)
     return text.strip()
 
 def clean_text(text):
@@ -155,7 +140,7 @@ def parse_date(entry):
 
 def is_fresh(published_dt):
     if not published_dt:
-        return True
+        return False
     return datetime.now(timezone.utc) - published_dt <= timedelta(hours=HOURS_LIMIT)
 
 def contains_bad_text(text):
@@ -173,14 +158,6 @@ def detect_category(text):
             return category
     return "Online Casino / General"
 
-def detect_importance(text):
-    lower = text.lower()
-    if any(w.lower() in lower for w in HIGH_IMPORTANCE_WORDS):
-        return "HIGH"
-    if any(w.lower() in lower for w in MEDIUM_IMPORTANCE_WORDS):
-        return "MEDIUM"
-    return "LOW"
-
 def fetch_article_text(url):
     try:
         headers = {"User-Agent": "Mozilla/5.0"}
@@ -196,7 +173,7 @@ def fetch_article_text(url):
         if contains_bad_text(text):
             return ""
 
-        if len(text) < 150:
+        if len(text) < 250:
             return ""
 
         return text[:3500]
@@ -204,16 +181,19 @@ def fetch_article_text(url):
         return ""
 
 def make_summary_ru(title_ru, article_ru):
-    text = article_ru if article_ru else title_ru
-    text = re.sub(r"\s+", " ", text).strip()
+    if not article_ru:
+        return "Полный текст статьи не удалось получить. Доступен только заголовок и ссылка на источник."
+
+    text = re.sub(r"\s+", " ", article_ru).strip()
+
+    if len(text) < 180:
+        return "Полный текст статьи не удалось получить. Доступен только заголовок и ссылка на источник."
 
     sentences = re.split(r"(?<=[.!?。！？])\s+", text)
     summary = " ".join(sentences[:4]).strip()
 
     summary = re.sub(r"\s+[-–—]\s+[A-Za-zА-Яа-я0-9 ._/]{2,50}$", "", summary)
-    summary = summary.replace(" Не удалось перевести автоматически.", "")
-
-    return summary[:1100] if summary else title_ru
+    return summary[:1100]
 
 def send_telegram(text):
     requests.post(
@@ -242,51 +222,20 @@ def get_google_items():
             if not title or not link:
                 continue
 
+            if not published_dt:
+                continue
+
             items.append({
                 "title": title,
                 "summary": summary,
                 "link": link,
                 "published_dt": published_dt,
                 "published_pretty": published_pretty,
-                "source": "Google News",
             })
 
     return items
 
-def get_yahoo_items():
-    items = []
-    headers = {"User-Agent": "Mozilla/5.0"}
-
-    for url in YAHOO_SEARCH_URLS:
-        try:
-            r = requests.get(url, headers=headers, timeout=15)
-            soup = BeautifulSoup(r.text, "lxml")
-
-            for a in soup.find_all("a", href=True)[:50]:
-                href = a.get("href", "")
-                title = clean_text(a.get_text(" ", strip=True))
-
-                if not title or len(title) < 12:
-                    continue
-
-                if "news.yahoo.co.jp/articles/" not in href:
-                    continue
-
-                items.append({
-                    "title": title,
-                    "summary": "",
-                    "link": href,
-                    "published_dt": None,
-                    "published_pretty": "Дата не указана / Yahoo",
-                    "source": "Yahoo Japan",
-                })
-
-        except Exception:
-            continue
-
-    return items
-
-def build_market_note(category_counts, importance_counts):
+def build_market_note(category_counts):
     if not category_counts:
         return "Сигналов по рынку недостаточно."
 
@@ -297,15 +246,13 @@ def build_market_note(category_counts, importance_counts):
     if top_category == "Аресты / расследования":
         return "Главный фокус — расследования и правоприменение. Это повышает риск для серого промо и брендов, которые явно таргетируют японских игроков."
     if top_category == "Платежи":
-        return "Главный фокус — платежи. Важно отслеживать методы депозитов/выводов, особенно если воронка связана с crypto, bank transfer или e-wallet."
+        return "Главный фокус — платежи. Важно отслеживать методы депозитов и выводов, особенно если воронка связана с crypto, bank transfer или e-wallet."
     if top_category == "Крипто":
         return "Главный фокус — крипто. Стоит следить за связкой crypto payments + offshore casino, так как она может стать отдельной темой регулирования."
     if top_category == "Affiliate / Marketing":
         return "Главный фокус — реклама и продвижение. Для affiliate это особенно важно: могут появляться риски по SEO, SNS, influencer traffic и рекламным заявлениям."
 
-    if importance_counts.get("HIGH", 0) > 0:
-        return "Есть новости высокого риска: стоит внимательно посмотреть источники и оценить влияние на японский трафик."
-    return "Рынок без явного сильного сигнала, но общий фон по онлайн-казино остаётся чувствительным."
+    return "Общий фон по онлайн-казино в Японии остаётся чувствительным, но без одного доминирующего сигнала."
 
 def compare_with_previous(current_stats, previous_stats):
     if not previous_stats:
@@ -330,7 +277,7 @@ def compare_with_previous(current_stats, previous_stats):
             growing.append(cat)
 
     if growing:
-        return f"Сравнение с прошлым запуском: {direction}. Больше всего выросли темы: {', '.join(growing)}."
+        return f"Сравнение с прошлым запуском: {direction}. Выросли темы: {', '.join(growing)}."
     return f"Сравнение с прошлым запуском: {direction}. Явного роста по отдельным темам нет."
 
 def send_digest(found_news, previous_stats):
@@ -338,16 +285,13 @@ def send_digest(found_news, previous_stats):
         return
 
     category_counts = {}
-    importance_counts = {"HIGH": 0, "MEDIUM": 0, "LOW": 0}
 
     for item in found_news:
         category_counts[item["category"]] = category_counts.get(item["category"], 0) + 1
-        importance_counts[item["importance"]] = importance_counts.get(item["importance"], 0) + 1
 
     current_stats = {
         "total": len(found_news),
         "categories": category_counts,
-        "importance": importance_counts,
         "last_run_utc": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -355,35 +299,21 @@ def send_digest(found_news, previous_stats):
         [f"{cat}: {count}" for cat, count in sorted(category_counts.items(), key=lambda x: x[1], reverse=True)]
     )
 
-    importance_text = (
-        f"HIGH: {importance_counts.get('HIGH', 0)}\n"
-        f"MEDIUM: {importance_counts.get('MEDIUM', 0)}\n"
-        f"LOW: {importance_counts.get('LOW', 0)}"
-    )
-
-    market_note = build_market_note(category_counts, importance_counts)
+    market_note = build_market_note(category_counts)
     comparison = compare_with_previous(current_stats, previous_stats)
-
-    safe_categories = html.escape(categories_text)
-    safe_importance = html.escape(importance_text)
-    safe_market_note = html.escape(market_note)
-    safe_comparison = html.escape(comparison)
 
     digest = f"""🇯🇵 <b>Итог по Japan iGaming за последние {HOURS_LIMIT} часов</b>
 
 Всего новых новостей: {len(found_news)}
 
 <b>Категории:</b>
-{safe_categories}
-
-<b>Уровень важности:</b>
-{safe_importance}
+{html.escape(categories_text)}
 
 <b>Вывод для рынка:</b>
-{safe_market_note}
+{html.escape(market_note)}
 
 <b>Динамика:</b>
-{safe_comparison}
+{html.escape(comparison)}
 """
 
     send_telegram(digest)
@@ -397,7 +327,7 @@ def main():
     seen_links = set()
     found_news = []
 
-    items = get_google_items() + get_yahoo_items()
+    items = get_google_items()
 
     for item in items:
         title = item["title"]
@@ -414,7 +344,7 @@ def main():
             continue
 
         article_jp = fetch_article_text(link)
-        source_text = article_jp if article_jp else summary
+        source_text = article_jp if article_jp else ""
 
         if contains_bad_text(source_text):
             continue
@@ -431,31 +361,22 @@ def main():
         short_summary = make_summary_ru(title_ru, article_ru)
 
         category = detect_category(f"{title} {summary} {article_jp}")
-        importance = detect_importance(f"{title} {summary} {article_jp}")
-
-        safe_title = html.escape(title)
-        safe_title_ru = html.escape(title_ru)
-        safe_summary = html.escape(short_summary)
-        safe_category = html.escape(category)
-        safe_importance = html.escape(importance)
-        safe_link = html.escape(link, quote=True)
 
         message = f"""🇯🇵 <b>JAPAN iGAMING NEWS</b>
 
 Дата: {html.escape(published_pretty)}
-Категория: {safe_category}
-Важность: {safe_importance}
+Категория: {html.escape(category)}
 
 <b>Оригинал:</b>
-{safe_title}
+{html.escape(title)}
 
 <b>Заголовок:</b>
-{safe_title_ru}
+{html.escape(title_ru)}
 
 <b>Краткая выжимка:</b>
-{safe_summary}
+{html.escape(short_summary)}
 
-🔗 <a href="{safe_link}">Открыть источник</a>
+🔗 <a href="{html.escape(link, quote=True)}">Открыть источник</a>
 """
 
         send_telegram(message)
@@ -464,7 +385,6 @@ def main():
         found_news.append({
             "title": title,
             "category": category,
-            "importance": importance,
             "link": link,
         })
 
