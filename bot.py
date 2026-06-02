@@ -14,6 +14,8 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 CHAT_ID = os.environ["CHAT_ID"]
 
 SENT_FILE = "sent_news.json"
+STATS_FILE = "news_stats.json"
+
 MAX_NEWS = 10
 HOURS_LIMIT = 48
 
@@ -75,18 +77,38 @@ CATEGORY_RULES = {
     "Affiliate / Marketing": ["広告", "アフィリエイト", "宣伝", "SNS", "インフルエンサー"],
 }
 
-def load_sent():
-    if not os.path.exists(SENT_FILE):
-        return set()
+HIGH_IMPORTANCE_WORDS = [
+    "逮捕", "摘発", "書類送検", "規制", "接続遮断", "削除要請", "総務省", "警察", "政府", "賭博罪"
+]
+
+MEDIUM_IMPORTANCE_WORDS = [
+    "決済", "送金", "暗号資産", "仮想通貨", "広告", "アフィリエイト"
+]
+
+def load_json_file(path, default):
+    if not os.path.exists(path):
+        return default
     try:
-        with open(SENT_FILE, "r", encoding="utf-8") as f:
-            return set(json.load(f))
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
     except Exception:
-        return set()
+        return default
+
+def save_json_file(path, data):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+def load_sent():
+    return set(load_json_file(SENT_FILE, []))
 
 def save_sent(sent):
-    with open(SENT_FILE, "w", encoding="utf-8") as f:
-        json.dump(list(sent)[-700:], f, ensure_ascii=False, indent=2)
+    save_json_file(SENT_FILE, list(sent)[-700:])
+
+def load_stats():
+    return load_json_file(STATS_FILE, {})
+
+def save_stats(stats):
+    save_json_file(STATS_FILE, stats)
 
 def make_id(text):
     return hashlib.md5(text.encode("utf-8")).hexdigest()
@@ -150,6 +172,14 @@ def detect_category(text):
         if any(word.lower() in text.lower() for word in words):
             return category
     return "Online Casino / General"
+
+def detect_importance(text):
+    lower = text.lower()
+    if any(w.lower() in lower for w in HIGH_IMPORTANCE_WORDS):
+        return "HIGH"
+    if any(w.lower() in lower for w in MEDIUM_IMPORTANCE_WORDS):
+        return "MEDIUM"
+    return "LOW"
 
 def fetch_article_text(url):
     try:
@@ -256,10 +286,116 @@ def get_yahoo_items():
 
     return items
 
+def build_market_note(category_counts, importance_counts):
+    if not category_counts:
+        return "Сигналов по рынку недостаточно."
+
+    top_category = max(category_counts, key=category_counts.get)
+
+    if top_category == "Регулирование":
+        return "Главный фокус — регулирование. Для affiliate это сигнал внимательнее следить за формулировками рекламы, источниками трафика и страницами, ориентированными на Японию."
+    if top_category == "Аресты / расследования":
+        return "Главный фокус — расследования и правоприменение. Это повышает риск для серого промо и брендов, которые явно таргетируют японских игроков."
+    if top_category == "Платежи":
+        return "Главный фокус — платежи. Важно отслеживать методы депозитов/выводов, особенно если воронка связана с crypto, bank transfer или e-wallet."
+    if top_category == "Крипто":
+        return "Главный фокус — крипто. Стоит следить за связкой crypto payments + offshore casino, так как она может стать отдельной темой регулирования."
+    if top_category == "Affiliate / Marketing":
+        return "Главный фокус — реклама и продвижение. Для affiliate это особенно важно: могут появляться риски по SEO, SNS, influencer traffic и рекламным заявлениям."
+
+    if importance_counts.get("HIGH", 0) > 0:
+        return "Есть новости высокого риска: стоит внимательно посмотреть источники и оценить влияние на японский трафик."
+    return "Рынок без явного сильного сигнала, но общий фон по онлайн-казино остаётся чувствительным."
+
+def compare_with_previous(current_stats, previous_stats):
+    if not previous_stats:
+        return "Сравнение с прошлым запуском: данных пока нет."
+
+    prev_total = previous_stats.get("total", 0)
+    cur_total = current_stats.get("total", 0)
+
+    if cur_total > prev_total:
+        direction = "новостей стало больше"
+    elif cur_total < prev_total:
+        direction = "новостей стало меньше"
+    else:
+        direction = "количество новостей примерно такое же"
+
+    prev_categories = previous_stats.get("categories", {})
+    cur_categories = current_stats.get("categories", {})
+
+    growing = []
+    for cat, count in cur_categories.items():
+        if count > prev_categories.get(cat, 0):
+            growing.append(cat)
+
+    if growing:
+        return f"Сравнение с прошлым запуском: {direction}. Больше всего выросли темы: {', '.join(growing)}."
+    return f"Сравнение с прошлым запуском: {direction}. Явного роста по отдельным темам нет."
+
+def send_digest(found_news, previous_stats):
+    if not found_news:
+        return
+
+    category_counts = {}
+    importance_counts = {"HIGH": 0, "MEDIUM": 0, "LOW": 0}
+
+    for item in found_news:
+        category_counts[item["category"]] = category_counts.get(item["category"], 0) + 1
+        importance_counts[item["importance"]] = importance_counts.get(item["importance"], 0) + 1
+
+    current_stats = {
+        "total": len(found_news),
+        "categories": category_counts,
+        "importance": importance_counts,
+        "last_run_utc": datetime.now(timezone.utc).isoformat(),
+    }
+
+    categories_text = "\n".join(
+        [f"{cat}: {count}" for cat, count in sorted(category_counts.items(), key=lambda x: x[1], reverse=True)]
+    )
+
+    importance_text = (
+        f"HIGH: {importance_counts.get('HIGH', 0)}\n"
+        f"MEDIUM: {importance_counts.get('MEDIUM', 0)}\n"
+        f"LOW: {importance_counts.get('LOW', 0)}"
+    )
+
+    market_note = build_market_note(category_counts, importance_counts)
+    comparison = compare_with_previous(current_stats, previous_stats)
+
+    safe_categories = html.escape(categories_text)
+    safe_importance = html.escape(importance_text)
+    safe_market_note = html.escape(market_note)
+    safe_comparison = html.escape(comparison)
+
+    digest = f"""🇯🇵 <b>Итог по Japan iGaming за последние {HOURS_LIMIT} часов</b>
+
+Всего новых новостей: {len(found_news)}
+
+<b>Категории:</b>
+{safe_categories}
+
+<b>Уровень важности:</b>
+{safe_importance}
+
+<b>Вывод для рынка:</b>
+{safe_market_note}
+
+<b>Динамика:</b>
+{safe_comparison}
+"""
+
+    send_telegram(digest)
+    save_stats(current_stats)
+
 def main():
     sent = load_sent()
+    previous_stats = load_stats()
+
     new_count = 0
     seen_links = set()
+    found_news = []
 
     items = get_google_items() + get_yahoo_items()
 
@@ -269,7 +405,6 @@ def main():
         link = item["link"]
         published_dt = item["published_dt"]
         published_pretty = item["published_pretty"]
-        source = item["source"]
 
         if link in seen_links:
             continue
@@ -296,17 +431,20 @@ def main():
         short_summary = make_summary_ru(title_ru, article_ru)
 
         category = detect_category(f"{title} {summary} {article_jp}")
+        importance = detect_importance(f"{title} {summary} {article_jp}")
 
         safe_title = html.escape(title)
         safe_title_ru = html.escape(title_ru)
         safe_summary = html.escape(short_summary)
         safe_category = html.escape(category)
+        safe_importance = html.escape(importance)
         safe_link = html.escape(link, quote=True)
 
         message = f"""🇯🇵 <b>JAPAN iGAMING NEWS</b>
 
 Дата: {html.escape(published_pretty)}
 Категория: {safe_category}
+Важность: {safe_importance}
 
 <b>Оригинал:</b>
 {safe_title}
@@ -321,7 +459,15 @@ def main():
 """
 
         send_telegram(message)
+
         sent.add(news_id)
+        found_news.append({
+            "title": title,
+            "category": category,
+            "importance": importance,
+            "link": link,
+        })
+
         new_count += 1
 
         if new_count >= MAX_NEWS:
@@ -329,6 +475,8 @@ def main():
 
     if new_count == 0:
         send_telegram("🇯🇵 За последние 48 часов новых новостей по японскому online casino / iGaming не найдено.")
+    else:
+        send_digest(found_news, previous_stats)
 
     save_sent(sent)
 
