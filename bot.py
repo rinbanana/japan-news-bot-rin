@@ -3,36 +3,43 @@ import json
 import hashlib
 import requests
 import feedparser
+from datetime import datetime, timezone, timedelta
+from email.utils import parsedate_to_datetime
+from bs4 import BeautifulSoup
 from deep_translator import GoogleTranslator
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 CHAT_ID = os.environ["CHAT_ID"]
 
 SENT_FILE = "sent_news.json"
+MAX_NEWS = 5
+HOURS_LIMIT = 24
 
 RSS_FEEDS = [
-    "https://news.google.com/rss/search?q=%E3%82%AA%E3%83%B3%E3%83%A9%E3%82%A4%E3%83%B3%E3%82%AB%E3%82%B8%E3%83%8E+%E6%97%A5%E6%9C%AC&hl=ja&gl=JP&ceid=JP:ja",
-    "https://news.google.com/rss/search?q=%E6%97%A5%E6%9C%AC+%E3%82%AB%E3%82%B8%E3%83%8E+%E8%A6%8F%E5%88%B6&hl=ja&gl=JP&ceid=JP:ja",
-    "https://news.google.com/rss/search?q=%E3%82%AA%E3%83%B3%E3%82%AB%E3%82%B8+%E9%80%AE%E6%8D%95&hl=ja&gl=JP&ceid=JP:ja",
-    "https://news.google.com/rss/search?q=Japan+online+casino+regulation&hl=en&gl=US&ceid=US:en",
+    "https://news.google.com/rss/search?q=%E3%82%AA%E3%83%B3%E3%83%A9%E3%82%A4%E3%83%B3%E3%82%AB%E3%82%B8%E3%83%8E+when:1d&hl=ja&gl=JP&ceid=JP:ja",
+    "https://news.google.com/rss/search?q=%E3%82%AA%E3%83%B3%E3%82%AB%E3%82%B8+when:1d&hl=ja&gl=JP&ceid=JP:ja",
+    "https://news.google.com/rss/search?q=%E3%82%AA%E3%83%B3%E3%82%AB%E3%82%B8+%E9%80%AE%E6%8D%95+when:1d&hl=ja&gl=JP&ceid=JP:ja",
+    "https://news.google.com/rss/search?q=%E3%82%AA%E3%83%B3%E3%82%AB%E3%82%B8+%E8%A6%8F%E5%88%B6+when:1d&hl=ja&gl=JP&ceid=JP:ja",
+    "https://news.google.com/rss/search?q=%E3%82%AA%E3%83%B3%E3%83%A9%E3%82%A4%E3%83%B3%E3%82%AB%E3%82%B8%E3%83%8E+%E6%91%98%E7%99%BA+when:1d&hl=ja&gl=JP&ceid=JP:ja",
+    "https://news.google.com/rss/search?q=Japan+online+casino+when:1d&hl=en&gl=US&ceid=US:en",
 ]
 
 KEYWORDS = [
     "オンラインカジノ",
     "オンカジ",
-    "カジノ",
-    "ギャンブル",
+    "違法カジノ",
     "賭博",
-    "違法",
+    "ギャンブル",
     "逮捕",
+    "摘発",
     "規制",
-    "暗号資産",
-    "仮想通貨",
+    "接続遮断",
+    "削除要請",
     "online casino",
     "igaming",
     "gambling",
     "casino",
-    "Japan",
+    "japan",
 ]
 
 def load_sent():
@@ -46,21 +53,54 @@ def load_sent():
 
 def save_sent(sent):
     with open(SENT_FILE, "w", encoding="utf-8") as f:
-        json.dump(list(sent)[-300:], f, ensure_ascii=False, indent=2)
+        json.dump(list(sent)[-500:], f, ensure_ascii=False, indent=2)
 
 def make_id(text):
     return hashlib.md5(text.encode("utf-8")).hexdigest()
 
+def clean_html(text):
+    if not text:
+        return ""
+    soup = BeautifulSoup(text, "html.parser")
+    return soup.get_text(" ", strip=True)
+
 def translate_to_ru(text):
+    if not text:
+        return "Нет текста для перевода."
     try:
         return GoogleTranslator(source="auto", target="ru").translate(text[:4500])
     except Exception:
         return "Не удалось перевести автоматически."
 
+def parse_date(entry):
+    raw = entry.get("published") or entry.get("updated")
+    if not raw:
+        return None, "Дата не указана"
+
+    try:
+        dt = parsedate_to_datetime(raw)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+
+        jst = dt.astimezone(timezone(timedelta(hours=9)))
+        pretty = jst.strftime("%Y-%m-%d %H:%M JST")
+        return dt.astimezone(timezone.utc), pretty
+    except Exception:
+        return None, raw
+
+def is_fresh(published_dt):
+    if not published_dt:
+        return False
+    now = datetime.now(timezone.utc)
+    return now - published_dt <= timedelta(hours=HOURS_LIMIT)
+
+def is_relevant(title, summary):
+    combined = f"{title} {summary}".lower()
+    return any(k.lower() in combined for k in KEYWORDS)
+
 def send_telegram(text):
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     requests.post(
-        url,
+        f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
         data={
             "chat_id": CHAT_ID,
             "text": text,
@@ -69,10 +109,6 @@ def send_telegram(text):
         timeout=20,
     )
 
-def is_relevant(title, summary):
-    combined = f"{title} {summary}".lower()
-    return any(k.lower() in combined for k in KEYWORDS)
-
 def main():
     sent = load_sent()
     new_count = 0
@@ -80,13 +116,17 @@ def main():
     for feed_url in RSS_FEEDS:
         feed = feedparser.parse(feed_url)
 
-        for entry in feed.entries[:8]:
-            title = entry.get("title", "").strip()
-            summary = entry.get("summary", "").strip()
+        for entry in feed.entries[:10]:
+            title = clean_html(entry.get("title", ""))
+            summary = clean_html(entry.get("summary", ""))
             link = entry.get("link", "").strip()
-            published = entry.get("published", "Дата не указана")
+
+            published_dt, published_pretty = parse_date(entry)
 
             if not title or not link:
+                continue
+
+            if not is_fresh(published_dt):
                 continue
 
             if not is_relevant(title, summary):
@@ -98,12 +138,12 @@ def main():
                 continue
 
             title_ru = translate_to_ru(title)
-            summary_ru = translate_to_ru(summary) if summary else "Краткое описание отсутствует."
+            summary_ru = translate_to_ru(summary)
 
             message = f"""🇯🇵 JAPAN iGAMING NEWS
 
 📅 Дата публикации:
-{published}
+{published_pretty}
 
 📰 Оригинал:
 {title}
@@ -113,11 +153,11 @@ def main():
 
 ━━━━━━━━━━━━
 
-🇯🇵 Описание / оригинал:
-{summary[:1000] if summary else "Описание отсутствует."}
+🇯🇵 Описание:
+{summary[:900] if summary else "Описание отсутствует."}
 
-🇷🇺 Описание / перевод:
-{summary_ru[:1200]}
+🇷🇺 Перевод описания:
+{summary_ru[:1100]}
 
 🔗 Источник:
 {link}
@@ -127,14 +167,14 @@ def main():
             sent.add(news_id)
             new_count += 1
 
-            if new_count >= 5:
+            if new_count >= MAX_NEWS:
                 break
 
-        if new_count >= 5:
+        if new_count >= MAX_NEWS:
             break
 
     if new_count == 0:
-        send_telegram("Сегодня новых новостей по Japan iGaming / online casino пока не найдено.")
+        send_telegram("За последние 24 часа новых новостей по Japan iGaming / online casino не найдено.")
 
     save_sent(sent)
 
