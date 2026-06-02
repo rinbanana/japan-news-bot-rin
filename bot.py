@@ -1,6 +1,7 @@
 import os
 import json
 import hashlib
+import re
 import requests
 import feedparser
 from datetime import datetime, timezone, timedelta
@@ -16,31 +17,30 @@ MAX_NEWS = 5
 HOURS_LIMIT = 24
 
 RSS_FEEDS = [
-    "https://news.google.com/rss/search?q=%E3%82%AA%E3%83%B3%E3%83%A9%E3%82%A4%E3%83%B3%E3%82%AB%E3%82%B8%E3%83%8E+when:1d&hl=ja&gl=JP&ceid=JP:ja",
-    "https://news.google.com/rss/search?q=%E3%82%AA%E3%83%B3%E3%82%AB%E3%82%B8+when:1d&hl=ja&gl=JP&ceid=JP:ja",
-    "https://news.google.com/rss/search?q=%E3%82%AA%E3%83%B3%E3%82%AB%E3%82%B8+%E9%80%AE%E6%8D%95+when:1d&hl=ja&gl=JP&ceid=JP:ja",
-    "https://news.google.com/rss/search?q=%E3%82%AA%E3%83%B3%E3%82%AB%E3%82%B8+%E8%A6%8F%E5%88%B6+when:1d&hl=ja&gl=JP&ceid=JP:ja",
-    "https://news.google.com/rss/search?q=%E3%82%AA%E3%83%B3%E3%83%A9%E3%82%A4%E3%83%B3%E3%82%AB%E3%82%B8%E3%83%8E+%E6%91%98%E7%99%BA+when:1d&hl=ja&gl=JP&ceid=JP:ja",
-    "https://news.google.com/rss/search?q=Japan+online+casino+when:1d&hl=en&gl=US&ceid=US:en",
+    "https://news.google.com/rss/search?q=オンラインカジノ+日本+when:1d&hl=ja&gl=JP&ceid=JP:ja",
+    "https://news.google.com/rss/search?q=オンカジ+日本+when:1d&hl=ja&gl=JP&ceid=JP:ja",
+    "https://news.google.com/rss/search?q=オンラインカジノ+逮捕+when:1d&hl=ja&gl=JP&ceid=JP:ja",
+    "https://news.google.com/rss/search?q=オンラインカジノ+規制+when:1d&hl=ja&gl=JP&ceid=JP:ja",
+    "https://news.google.com/rss/search?q=オンラインカジノ+摘発+when:1d&hl=ja&gl=JP&ceid=JP:ja",
+    "https://news.google.com/rss/search?q=オンラインカジノ+接続遮断+when:1d&hl=ja&gl=JP&ceid=JP:ja",
+    "https://news.google.com/rss/search?q=オンラインカジノ+削除要請+when:1d&hl=ja&gl=JP&ceid=JP:ja",
+    "https://news.google.com/rss/search?q=オンラインカジノ+決済+when:1d&hl=ja&gl=JP&ceid=JP:ja",
+    "https://news.google.com/rss/search?q=オンラインカジノ+暗号資産+when:1d&hl=ja&gl=JP&ceid=JP:ja",
 ]
 
 KEYWORDS = [
-    "オンラインカジノ",
-    "オンカジ",
-    "違法カジノ",
-    "賭博",
-    "ギャンブル",
-    "逮捕",
-    "摘発",
-    "規制",
-    "接続遮断",
-    "削除要請",
-    "online casino",
-    "igaming",
-    "gambling",
-    "casino",
-    "japan",
+    "オンラインカジノ", "オンカジ", "違法カジノ", "賭博", "ギャンブル",
+    "逮捕", "摘発", "規制", "接続遮断", "削除要請", "決済",
+    "暗号資産", "仮想通貨", "カジノサイト", "カジノアプリ"
 ]
+
+CATEGORY_RULES = {
+    "🚨 Аресты / расследования": ["逮捕", "摘発", "書類送検", "容疑", "警察"],
+    "⚖️ Регулирование": ["規制", "違法", "接続遮断", "削除要請", "総務省", "政府"],
+    "💳 Платежи": ["決済", "送金", "銀行", "クレジット", "入金", "出金"],
+    "₿ Крипто": ["暗号資産", "仮想通貨", "ビットコイン", "crypto"],
+    "📈 Affiliate / Marketing": ["広告", "アフィリエイト", "宣伝", "SNS", "インフルエンサー"],
+}
 
 def load_sent():
     if not os.path.exists(SENT_FILE):
@@ -64,6 +64,11 @@ def clean_html(text):
     soup = BeautifulSoup(text, "html.parser")
     return soup.get_text(" ", strip=True)
 
+def clean_text(text):
+    text = clean_html(text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
 def translate_to_ru(text):
     if not text:
         return "Нет текста для перевода."
@@ -76,27 +81,57 @@ def parse_date(entry):
     raw = entry.get("published") or entry.get("updated")
     if not raw:
         return None, "Дата не указана"
-
     try:
         dt = parsedate_to_datetime(raw)
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
-
         jst = dt.astimezone(timezone(timedelta(hours=9)))
-        pretty = jst.strftime("%Y-%m-%d %H:%M JST")
-        return dt.astimezone(timezone.utc), pretty
+        return dt.astimezone(timezone.utc), jst.strftime("%Y-%m-%d %H:%M JST")
     except Exception:
         return None, raw
 
 def is_fresh(published_dt):
     if not published_dt:
         return False
-    now = datetime.now(timezone.utc)
-    return now - published_dt <= timedelta(hours=HOURS_LIMIT)
+    return datetime.now(timezone.utc) - published_dt <= timedelta(hours=HOURS_LIMIT)
 
 def is_relevant(title, summary):
     combined = f"{title} {summary}".lower()
     return any(k.lower() in combined for k in KEYWORDS)
+
+def detect_category(text):
+    for category, words in CATEGORY_RULES.items():
+        if any(word.lower() in text.lower() for word in words):
+            return category
+    return "🎰 Online Casino / General"
+
+def fetch_article_text(url):
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0"
+        }
+        r = requests.get(url, headers=headers, timeout=15)
+        soup = BeautifulSoup(r.text, "lxml")
+
+        for tag in soup(["script", "style", "nav", "footer", "header", "aside"]):
+            tag.decompose()
+
+        paragraphs = [p.get_text(" ", strip=True) for p in soup.find_all("p")]
+        text = " ".join(paragraphs)
+        text = clean_text(text)
+
+        if len(text) < 200:
+            return ""
+
+        return text[:3000]
+    except Exception:
+        return ""
+
+def make_summary_ru(title_ru, article_ru):
+    text = article_ru if article_ru and article_ru != "Не удалось перевести автоматически." else title_ru
+    sentences = re.split(r"(?<=[.!?。！？])\s+", text)
+    summary = " ".join(sentences[:3]).strip()
+    return summary[:900] if summary else title_ru
 
 def send_telegram(text):
     requests.post(
@@ -117,8 +152,8 @@ def main():
         feed = feedparser.parse(feed_url)
 
         for entry in feed.entries[:10]:
-            title = clean_html(entry.get("title", ""))
-            summary = clean_html(entry.get("summary", ""))
+            title = clean_text(entry.get("title", ""))
+            summary = clean_text(entry.get("summary", ""))
             link = entry.get("link", "").strip()
 
             published_dt, published_pretty = parse_date(entry)
@@ -137,27 +172,30 @@ def main():
             if news_id in sent:
                 continue
 
+            article_jp = fetch_article_text(link)
+            source_text = article_jp if article_jp else summary
+
             title_ru = translate_to_ru(title)
-            summary_ru = translate_to_ru(summary)
+            article_ru = translate_to_ru(source_text)
+            short_summary = make_summary_ru(title_ru, article_ru)
+
+            category = detect_category(f"{title} {summary} {article_jp}")
 
             message = f"""🇯🇵 JAPAN iGAMING NEWS
 
-📅 Дата публикации:
-{published_pretty}
+📅 {published_pretty}
+
+🏷 Категория:
+{category}
 
 📰 Оригинал:
 {title}
 
-🇷🇺 Перевод:
+🇷🇺 Заголовок:
 {title_ru}
 
-━━━━━━━━━━━━
-
-🇯🇵 Описание:
-{summary[:900] if summary else "Описание отсутствует."}
-
-🇷🇺 Перевод описания:
-{summary_ru[:1100]}
+📌 Краткая выжимка:
+{short_summary}
 
 🔗 Источник:
 {link}
@@ -174,7 +212,7 @@ def main():
             break
 
     if new_count == 0:
-        send_telegram("За последние 24 часа новых новостей по Japan iGaming / online casino не найдено.")
+        send_telegram("За последние 24 часа новых новостей по японскому online casino / iGaming не найдено.")
 
     save_sent(sent)
 
